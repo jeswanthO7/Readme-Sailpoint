@@ -1600,4 +1600,124 @@ The intended final architecture is:
 
 The fundamental design principle is:
 
-**Catalogs should know how to request access. The Middleware should know how to translate that request into an access decision/request for SailPoint. SailPoint remains the access-management backend.**
+**Catalogs should know how to request access. The Middleware should know how to translate that request into an access decision/request for SailPoint. SailPoint remains the access-management backend.**u
+# Catalog-Agnostic Access Request Middleware
+
+## 1. Objective
+
+Build a reusable **Middleware** that enables users to request access to **Google BigQuery tables and views** from any supported data catalog.
+
+The Middleware will use the **SailPoint API** to create and manage access requests.
+
+The solution should be **catalog-agnostic**, allowing catalogs such as Atlan, Google Knowledge Catalog, and future catalogs to integrate through a common interface.
+
+---
+
+## 2. High-Level Architecture
+
+```text
+        Data Catalogs
+   ┌────────┬─────────────┐
+   │        │             │
+ Atlan   Knowledge     Future
+         Catalog       Catalog
+   │        │             │
+   └────────┼─────────────┘
+            │
+            ▼
+      ┌─────────────┐
+      │ Middleware  │
+      └──────┬──────┘
+             │
+             │ SailPoint API
+             ▼
+       ┌───────────┐
+       │ SailPoint │
+       └───────────┘
+```
+
+---
+
+## 3. Access Request Flow
+
+1. User discovers a BigQuery table/view in a data catalog.
+2. User selects **Request Access**.
+3. The catalog sends the request to the Middleware.
+4. Middleware validates the request and identifies the requested BigQuery resource.
+5. Middleware resolves the corresponding SailPoint entitlement/access object.
+6. Middleware authenticates with SailPoint using **OAuth 2.0**.
+7. Middleware submits the access request through the **SailPoint API**.
+8. SailPoint handles the approval/rejection workflow and provisioning.
+9. Middleware provides the request status back to the catalog.
+
+---
+
+## 4. Middleware Responsibilities
+
+At a high level, Middleware will handle:
+
+* Request validation
+* User/identity resolution
+* BigQuery resource resolution
+* Access-level resolution
+* SailPoint entitlement resolution
+* Existing-access/duplicate-request checks
+* SailPoint API integration
+* Request status handling
+* Error/response normalization
+* Catalog-independent API interface
+
+---
+
+## 5. Authentication
+
+Middleware will authenticate with SailPoint using **OAuth 2.0**.
+
+The SailPoint administrator will provide:
+
+* Client ID
+* Client Secret
+* Token endpoint
+* Required scopes/permissions
+
+Credentials will be securely managed in the GCP environment.
+
+---
+
+## 6. Initial Scope
+
+The initial implementation will support:
+
+* BigQuery tables
+* BigQuery views
+* Table/view-level access requests
+* Integration with SailPoint
+* Integration capability for multiple data catalogs
+
+---
+
+## 7. Future Scope
+
+The design should allow future support for:
+
+* Column-level access
+* Additional access levels
+* Additional data platforms
+* Additional data catalogs
+
+---
+
+## 8. Technology Direction
+
+The solution will align with the existing technology stack:
+
+* **Python**
+* **FastAPI**
+* **GKE**
+* **Docker**
+* **GCP Secret Manager**
+* **SailPoint REST API**
+* **OAuth 2.0**
+* **GCP logging/monitoring**
+
+The detailed architecture, API contract, entitlement mapping strategy, and deployment design will be defined in subsequent phases.
