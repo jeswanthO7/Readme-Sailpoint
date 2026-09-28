@@ -717,4 +717,887 @@ Before implementation, the following should be confirmed with the MyAccess/SailP
 14. What is the expected behavior for duplicate requests?
 15. How should column-level access be represented when it becomes available?
 
-These answers will determine the final API contract and the amount of logic that needs to exist inside the MyAccess integration.
+# Catalog-Agnostic Data Access Request Middleware
+
+## 1. Overview
+
+The objective is to build a reusable **Middleware** that enables users to request access to BigQuery tables and views directly from any supported data catalog.
+
+The Middleware acts as the integration layer between data catalogs such as **Atlan**, **Google Knowledge Catalog**, and future catalogs, and the organization's **SailPoint API**.
+
+The Middleware will be catalog-agnostic. Catalog-specific implementations should only be responsible for translating their native request format into the common Middleware request format.
+
+### Primary goal
+
+Provide a standardized process:
+
+**Data Catalog → Middleware → SailPoint API → Access Request / Approval / Provisioning**
+
+The initial scope is:
+
+* BigQuery tables
+* BigQuery views
+* Table/view-level access
+* SailPoint-based access requests
+* OAuth 2.0 authentication with SailPoint
+
+Future scope may include:
+
+* Column-level access
+* Additional data catalogs
+* Additional access levels
+* Additional data platforms
+
+---
+
+# 2. High-Level Architecture
+
+```text
+                         DATA CATALOGS
+
+              ┌──────────────┐
+              │    Atlan     │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │   Google     │
+              │   Knowledge  │
+              │   Catalog    │
+              └──────┬───────┘
+                     │
+              ┌──────▼───────┐
+              │    Future    │
+              │   Catalogs   │
+              └──────┬───────┘
+                     │
+                     │ HTTPS / REST
+                     ▼
+            ┌──────────────────────┐
+            │      MIDDLEWARE      │
+            │                      │
+            │ Request Validation   │
+            │ User Resolution      │
+            │ Asset Resolution     │
+            │ Entitlement Mapping  │
+            │ Access Validation    │
+            │ SailPoint Request    │
+            │ Status Handling      │
+            │ Error Handling       │
+            └──────────┬───────────┘
+                       │
+                       │ OAuth 2.0
+                       ▼
+            ┌──────────────────────┐
+            │     SailPoint API    │
+            │                      │
+            │ Access Request       │
+            │ Approval Workflow    │
+            │ Provisioning         │
+            └──────────────────────┘
+```
+
+---
+
+# 3. Core Concept
+
+The Middleware should not be tightly coupled to any particular catalog.
+
+For example, Atlan may represent a BigQuery table differently from Google Knowledge Catalog.
+
+The Middleware should convert both into a common internal representation.
+
+### Example
+
+A catalog sends:
+
+```json
+{
+  "assetId": "12345",
+  "assetType": "table",
+  "qualifiedName": "analytics-prod.customer.customers"
+}
+```
+
+The Middleware converts this into a canonical resource:
+
+```json
+{
+  "resourceType": "BIGQUERY_TABLE",
+  "project": "analytics-prod",
+  "dataset": "customer",
+  "name": "customers"
+}
+```
+
+The same principle applies to BigQuery views.
+
+---
+
+# 4. End-to-End Process
+
+## Step 1 — User selects an asset
+
+A user discovers a BigQuery table or view through a data catalog.
+
+Example:
+
+```text
+Catalog
+  ↓
+analytics-prod.customer.customers
+```
+
+The user selects:
+
+**Request Access**
+
+---
+
+## Step 2 — Catalog calls Middleware
+
+The catalog sends an access-request request to the Middleware.
+
+Conceptually:
+
+```http
+POST /v1/access-requests
+```
+
+The request contains:
+
+* Requester
+* Catalog
+* Resource
+* Resource type
+* Requested access level
+* Justification
+* Catalog-specific reference, if required
+
+Example:
+
+```json
+{
+  "requester": {
+    "email": "user@company.com"
+  },
+  "resource": {
+    "type": "BIGQUERY_TABLE",
+    "project": "analytics-prod",
+    "dataset": "customer",
+    "name": "customers"
+  },
+  "access": {
+    "level": "READ"
+  },
+  "justification": "Required for analytics",
+  "source": {
+    "catalog": "atlan"
+  }
+}
+```
+
+The exact external API contract can be finalized during implementation.
+
+---
+
+# 5. Middleware Processing
+
+After receiving the request, the Middleware performs several steps.
+
+## 5.1 Request validation
+
+Validate:
+
+* Required fields
+* User identity
+* Resource type
+* Project
+* Dataset
+* Table/view name
+* Access level
+* Justification
+* Source catalog
+
+Invalid requests should be rejected before calling SailPoint.
+
+---
+
+## 5.2 User / Identity Resolution
+
+The Middleware determines the corresponding SailPoint identity for the requester.
+
+Conceptually:
+
+```text
+Catalog User
+     ↓
+Email / Employee ID
+     ↓
+SailPoint Identity
+     ↓
+SailPoint Identity ID
+```
+
+The exact identity-resolution mechanism depends on the organization's SailPoint configuration.
+
+---
+
+# 6. Resource Resolution
+
+The Middleware determines the actual BigQuery resource being requested.
+
+### Table
+
+```text
+Project
+   ↓
+Dataset
+   ↓
+Table
+```
+
+Example:
+
+```text
+analytics-prod.customer.customers
+```
+
+### View
+
+```text
+Project
+   ↓
+Dataset
+   ↓
+View
+```
+
+Example:
+
+```text
+analytics-prod.customer.customer_summary
+```
+
+The Middleware should maintain a canonical representation independent of the catalog.
+
+---
+
+# 7. Entitlement Resolution
+
+This is one of the most important responsibilities of the Middleware.
+
+The Middleware must determine which SailPoint access object corresponds to the requested BigQuery resource and access level.
+
+Conceptually:
+
+```text
+BigQuery Resource
+        ↓
+Access Level
+        ↓
+Entitlement Resolver
+        ↓
+SailPoint Entitlement / Access Profile
+```
+
+Example:
+
+```text
+analytics-prod.customer.customers
+             +
+            READ
+             ↓
+     BQ_CUSTOMER_READ
+             ↓
+      SailPoint Object
+```
+
+The exact SailPoint object used for the mapping must be confirmed with the SailPoint/IAM team.
+
+The mapping should not be hard-coded into catalog-specific code.
+
+---
+
+# 8. Existing Access Validation
+
+Before creating a new request, the Middleware should determine whether the user already has the requested access.
+
+Conceptually:
+
+```text
+Does user already have entitlement?
+          │
+     ┌────┴────┐
+     │         │
+    YES        NO
+     │         │
+     ▼         ▼
+ Return       Continue
+ existing     request
+ access
+```
+
+The actual implementation depends on the SailPoint APIs available in the organization's environment.
+
+---
+
+# 9. Duplicate Request Handling
+
+The Middleware should also handle cases where the user already has an active/pending request for the same entitlement.
+
+Example:
+
+```text
+User
+ ↓
+Request BQ_CUSTOMER_READ
+ ↓
+Existing pending request found
+```
+
+The Middleware should avoid unnecessarily creating another identical request.
+
+The exact duplicate behavior should be finalized based on SailPoint's capabilities and organizational requirements.
+
+---
+
+# 10. SailPoint Authentication
+
+The Middleware will authenticate with SailPoint using **OAuth 2.0**.
+
+The SailPoint administrator will provide:
+
+* Client ID
+* Client Secret
+* OAuth token endpoint
+* Required scope, if applicable
+* Required permissions
+
+Conceptually:
+
+```text
+Middleware
+     │
+     │ client_id
+     │ client_secret
+     ▼
+SailPoint OAuth Endpoint
+     │
+     ▼
+Access Token
+     │
+     ▼
+Authorization: Bearer <token>
+```
+
+Client credentials must not be stored in source code.
+
+They should be securely managed using the organization's approved secret-management mechanism.
+
+For the GCP environment, **GCP Secret Manager** is the preferred option.
+
+---
+
+# 11. SailPoint API Request
+
+Once the Middleware has resolved:
+
+* SailPoint identity
+* BigQuery resource
+* Access level
+* SailPoint entitlement/access object
+* Justification
+
+it constructs the SailPoint API request according to the organization's SailPoint API documentation.
+
+Conceptually:
+
+```text
+Canonical Access Request
+          ↓
+SailPoint-specific request
+          ↓
+SailPoint Access Request API
+```
+
+The Middleware should isolate SailPoint-specific payload construction inside the SailPoint integration layer.
+
+---
+
+# 12. Request Lifecycle
+
+Creating an access request and completing the access request are separate stages.
+
+A typical lifecycle may look like:
+
+```text
+REQUESTED
+    ↓
+PENDING_APPROVAL
+    ↓
+APPROVED
+    ↓
+PROVISIONED
+```
+
+or:
+
+```text
+REQUESTED
+    ↓
+PENDING_APPROVAL
+    ↓
+REJECTED
+```
+
+The actual statuses depend on the SailPoint implementation.
+
+The Middleware should expose a catalog-neutral representation of the status.
+
+---
+
+# 13. Status Retrieval
+
+The Middleware should provide a way for the originating catalog to determine the current state of a request.
+
+Conceptually:
+
+```http
+GET /v1/access-requests/{requestId}
+```
+
+Example response:
+
+```json
+{
+  "requestId": "123456",
+  "status": "PENDING_APPROVAL"
+}
+```
+
+Possible normalized states could include:
+
+```text
+PENDING
+APPROVED
+REJECTED
+PROVISIONED
+FAILED
+```
+
+The exact mapping should be finalized after testing the SailPoint API.
+
+---
+
+# 14. Error Handling
+
+The Middleware should hide SailPoint-specific errors from catalog integrations wherever possible.
+
+For example:
+
+```text
+SailPoint
+    ↓
+HTTP 400
+SailPoint-specific error
+    ↓
+Middleware
+    ↓
+Normalized error
+    ↓
+Catalog
+```
+
+Example:
+
+```json
+{
+  "status": "REJECTED",
+  "code": "ACCESS_NOT_ELIGIBLE",
+  "message": "The requested access is not available for this user."
+}
+```
+
+The Middleware should distinguish between:
+
+### Authentication failures
+
+```text
+401 Unauthorized
+```
+
+### Authorization failures
+
+```text
+403 Forbidden
+```
+
+### Invalid requests
+
+```text
+400 Bad Request
+```
+
+### Resource/entitlement issues
+
+```text
+Resource does not exist
+Entitlement does not exist
+User is not eligible
+```
+
+### Duplicate requests
+
+```text
+Existing request/access found
+```
+
+### SailPoint/system failures
+
+```text
+5xx / timeout / unavailable
+```
+
+The exact status and error mapping should be based on actual SailPoint API behavior discovered during testing.
+
+---
+
+# 15. Technology Stack
+
+The organization primarily uses GCP, Python and GKE. The proposed stack therefore follows the existing ecosystem.
+
+### Application
+
+```text
+Python
+FastAPI
+```
+
+FastAPI provides:
+
+* REST API implementation
+* Request validation
+* OpenAPI documentation
+* Type-safe request/response models
+* Good support for asynchronous operations
+
+### Deployment
+
+```text
+Docker
+   ↓
+GKE
+```
+
+The Middleware will run as a containerized service on GKE.
+
+### Secrets
+
+```text
+GCP Secret Manager
+```
+
+Used for:
+
+* SailPoint client secret
+* Other sensitive integration credentials
+
+Client IDs may also be configuration-managed depending on organizational standards.
+
+### Logging
+
+```text
+Google Cloud Logging
+```
+
+### Monitoring
+
+```text
+Google Cloud Monitoring
+```
+
+### Optional persistence
+
+If entitlement mappings, request state, or configuration need to be persisted outside SailPoint:
+
+```text
+Cloud SQL
+PostgreSQL
+```
+
+This should only be introduced if required by the final architecture.
+
+---
+
+# 16. Proposed Internal Structure
+
+A possible Python project structure:
+
+```text
+middleware/
+│
+├── main.py
+│
+├── api/
+│   └── access_requests.py
+│
+├── services/
+│   ├── access_request_service.py
+│   ├── entitlement_resolver.py
+│   ├── identity_resolver.py
+│   └── resource_resolver.py
+│
+├── integrations/
+│   │
+│   ├── sailpoint/
+│   │   ├── client.py
+│   │   ├── auth.py
+│   │   └── models.py
+│   │
+│   └── catalogs/
+│       ├── base.py
+│       ├── atlan.py
+│       └── knowledge_catalog.py
+│
+├── models/
+│   └── access_request.py
+│
+└── config/
+    └── settings.py
+```
+
+The exact structure can change based on the team's existing Python standards.
+
+---
+
+# 17. Catalog Integration Model
+
+The Middleware should expose a **common API contract**.
+
+The catalogs should not need to understand SailPoint's API.
+
+```text
+                  Middleware API
+                       ▲
+                       │
+       ┌───────────────┼────────────────┐
+       │               │                │
+     Atlan       Knowledge Catalog   Future Catalog
+       │               │                │
+       └───────────────┴────────────────┘
+```
+
+Each catalog only needs to translate its asset/request information into the common Middleware contract.
+
+---
+
+# 18. Future Column-Level Access
+
+The initial implementation focuses on table/view-level access.
+
+However, the request model should be designed so that column-level access can be introduced without redesigning the entire system.
+
+### Current
+
+```json
+{
+  "resource": {
+    "type": "BIGQUERY_TABLE",
+    "project": "analytics-prod",
+    "dataset": "customer",
+    "name": "customers"
+  },
+  "access": {
+    "level": "READ"
+  }
+}
+```
+
+### Future
+
+```json
+{
+  "resource": {
+    "type": "BIGQUERY_TABLE",
+    "project": "analytics-prod",
+    "dataset": "customer",
+    "name": "customers"
+  },
+  "scope": {
+    "type": "COLUMN",
+    "columns": [
+      "customer_id",
+      "customer_name"
+    ]
+  },
+  "access": {
+    "level": "READ"
+  }
+}
+```
+
+This keeps the core architecture extensible.
+
+---
+
+# 19. Initial Testing Strategy
+
+Before implementing the complete Middleware, the SailPoint API should be tested independently using Postman.
+
+### Authentication
+
+* Obtain OAuth 2.0 token
+* Verify token
+* Test expired/invalid token
+* Test insufficient permissions
+
+### Access request
+
+* Valid table request
+* Valid view request
+* Invalid user
+* Invalid entitlement
+* Missing required fields
+* Invalid access level
+* User already has access
+* Duplicate/pending request
+* User not eligible
+* Request rejected
+* SailPoint API failure
+
+For every scenario record:
+
+```text
+Request
+HTTP status
+Response
+Error code
+Error message
+Request ID
+Final status
+```
+
+These results will define the behavior that the Middleware needs to implement.
+
+---
+
+# 20. V1 Scope
+
+### Included
+
+* BigQuery tables
+* BigQuery views
+* Catalog-agnostic request API
+* OAuth 2.0 authentication
+* SailPoint API integration
+* User/identity resolution
+* Resource resolution
+* Entitlement resolution
+* Access request creation
+* Request status
+* Error handling
+* Atlan integration capability
+* Google Knowledge Catalog integration capability
+* GKE deployment
+
+### Future
+
+* Column-level access
+* Additional catalogs
+* Additional data platforms
+* Advanced policy/eligibility evaluation
+* Event-driven status updates
+* Additional access types
+
+---
+
+# 21. Key Open Questions
+
+The following should be clarified with the SailPoint/IAM team before finalizing the implementation:
+
+1. What SailPoint object represents BigQuery table/view access?
+
+   * Entitlement?
+   * Access Profile?
+   * Role?
+   * Other?
+
+2. How is a BigQuery resource mapped to that SailPoint object?
+
+3. Can the SailPoint API resolve an entitlement from a resource, or must the Middleware maintain the mapping?
+
+4. How do we resolve a catalog user to a SailPoint identity?
+
+5. How do we check whether the user already has the entitlement?
+
+6. How do we check for an existing pending request?
+
+7. What are the exact SailPoint request lifecycle states?
+
+8. How can the Middleware retrieve the final request status?
+
+9. What happens when an approval is rejected?
+
+10. Is there a SailPoint webhook/event mechanism available for request-status changes?
+
+11. What OAuth 2.0 scopes and permissions are required?
+
+12. Are there API rate limits that the Middleware needs to handle?
+
+---
+
+# 22. Target Architecture
+
+The intended final architecture is:
+
+```text
+                    ┌─────────────────┐
+                    │      Atlan      │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ Knowledge       │
+                    │ Catalog         │
+                    └────────┬────────┘
+                             │
+                    ┌────────▼────────┐
+                    │ Future Catalogs │
+                    └────────┬────────┘
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │       MIDDLEWARE       │
+                 │                        │
+                 │ FastAPI / Python       │
+                 │                        │
+                 │ ┌────────────────────┐ │
+                 │ │ Request Validation │ │
+                 │ ├────────────────────┤ │
+                 │ │ Identity Resolver  │ │
+                 │ ├────────────────────┤ │
+                 │ │ Resource Resolver  │ │
+                 │ ├────────────────────┤ │
+                 │ │ Entitlement        │ │
+                 │ │ Resolver           │ │
+                 │ ├────────────────────┤ │
+                 │ │ Access Validation  │ │
+                 │ ├────────────────────┤ │
+                 │ │ Request Management │ │
+                 │ ├────────────────────┤ │
+                 │ │ Status Management  │ │
+                 │ └────────────────────┘ │
+                 │            │           │
+                 │      SailPoint Client  │
+                 └────────────┬───────────┘
+                              │
+                       OAuth 2.0
+                              │
+                              ▼
+                   ┌───────────────────┐
+                   │   SailPoint API   │
+                   └───────────────────┘
+```
+
+The fundamental design principle is:
+
+**Catalogs should know how to request access. The Middleware should know how to translate that request into an access decision/request for SailPoint. SailPoint remains the access-management backend.**
